@@ -1,7 +1,7 @@
 name: Run eBPF Trace
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:   # Trigger manually from GitHub Actions tab
 
 jobs:
   ebpf-trace:
@@ -21,60 +21,33 @@ jobs:
       - name: Run eBPF Python script
         run: |
           cat > trace_connect.py <<'EOF'
-          import os
           from bcc import BPF
 
-          bpf_code = """
+          bpf_program = """
           #include <uapi/linux/ptrace.h>
           #include <linux/sched.h>
-          #include <linux/net.h>
 
-          int trace_connect(struct pt_regs *ctx) {
-              u32 pid = bpf_get_current_pid_tgid() >> 32;
+          TRACEPOINT_PROBE(syscalls, sys_enter_execve) {
+              char fname[256];
               char comm[16];
-              bpf_get_current_comm(&comm, sizeof(comm));
+              u32 pid = bpf_get_current_pid_tgid() >> 32;
 
-              bpf_trace_printk("%d %s\\n", pid, comm);
+              bpf_get_current_comm(&comm, sizeof(comm));
+              bpf_probe_read_user_str(&fname, sizeof(fname), (void *)args->filename);
+
+              bpf_trace_printk("[ALERT] Exec: %s (PID %d)\\n", fname, pid);
+
               return 0;
           }
           """
 
-          b = BPF(text=bpf_code)
-          b.attach_kprobe(event="__x64_sys_connect", fn_name="trace_connect")
-          print("Tracing connect... Ctrl+C to exit.")
+          b = BPF(text=bpf_program)
+          print("🚀 Tracing execve (process executions from /tmp)... (Ctrl+C to stop)")
 
-          def get_proc_details(pid):
-              details = {}
-              try:
-                  details["exe"] = os.readlink(f"/proc/{pid}/exe")
-              except Exception:
-                  details["exe"] = "N/A"
-              try:
-                  with open(f"/proc/{pid}/cmdline", "r") as f:
-                      cmd = f.read().replace("\\x00", " ").strip()
-                      details["cmdline"] = cmd if cmd else "N/A"
-              except Exception:
-                  details["cmdline"] = "N/A"
-              try:
-                  with open(f"/proc/{pid}/status") as f:
-                      for line in f:
-                          if line.startswith("PPid:"):
-                              details["ppid"] = line.split()[1]
-                              break
-              except Exception:
-                  details["ppid"] = "N/A"
-              return details
-
-          while True:
-              (task, pid, cpu, flags, ts, msg) = b.trace_fields()
-              try:
-                  pid_str, comm = msg.split(" ", 1)
-                  pid = int(pid_str)
-              except Exception:
-                  continue
-
-              details = get_proc_details(pid)
-              print(f"[PID {pid}] COMM={comm}, EXE={details['exe']}, CMDLINE={details['cmdline']}, PPID={details['ppid']}")
+          try:
+              b.trace_print()
+          except KeyboardInterrupt:
+              print("\n🛑 Stopped tracing.")
           EOF
 
           sudo python3 trace_connect.py
