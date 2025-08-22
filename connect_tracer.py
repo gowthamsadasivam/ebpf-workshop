@@ -6,6 +6,7 @@ bpf_code = """
 #include <linux/net.h>
 
 int trace_connect(struct pt_regs *ctx) {
+    #  holds the process id and thread group id
     u32 pid = bpf_get_current_pid_tgid() >> 32;
     char comm[16];
     bpf_get_current_comm(&comm, sizeof(comm));
