@@ -22,10 +22,31 @@ jobs:
         run: |
           cat > trace_connect.py <<'EOF'
           from bcc import BPF
+          import threading
+          import time
+          import os
 
           bpf_code = """
           #include <uapi/linux/ptrace.h>
           #include <linux/sched.h>
+
+          // Check if filename ends with ".env"
+          static __inline int endswith_env(const char *fname) {
+              #pragma unroll
+              for (int i = 4; i < 256; i++) {
+                  if (fname[i] == '\\0') {
+                      if (fname[i-1] == 'v' &&
+                          fname[i-2] == 'n' &&
+                          fname[i-3] == 'e' &&
+                          fname[i-4] == '.') {
+                          return 1;
+                      } else {
+                          return 0;
+                      }
+                  }
+              }
+              return 0;
+          }
 
           TRACEPOINT_PROBE(syscalls, sys_enter_openat) {
               char comm[16] = {};
@@ -34,8 +55,10 @@ jobs:
               bpf_get_current_comm(&comm, sizeof(comm));
               int ret = bpf_probe_read_user_str(&fname, sizeof(fname), args->filename);
 
-              bpf_trace_printk("[EAD] Process: %s\\n", comm);
-              bpf_trace_printk("             File: %s\\n", fname);
+              if (ret > 0 && endswith_env(fname)) {
+                  bpf_trace_printk("[.env READ] Process: %s\\n", comm);
+                  bpf_trace_printk("             File: %s\\n", fname);
+              }
 
               return 0;
           }
@@ -47,16 +70,47 @@ jobs:
               bpf_get_current_comm(&comm, sizeof(comm));
               int ret = bpf_probe_read_user_str(&fname, sizeof(fname), args->filename);
 
-              bpf_trace_printk("[READ] Process: %s\\n", comm);
-              bpf_trace_printk("             File: %s\\n", fname);
+              if (ret > 0 && endswith_env(fname)) {
+                  bpf_trace_printk("[.env READ] Process: %s\\n", comm);
+                  bpf_trace_printk("             File: %s\\n", fname);
+              }
 
               return 0;
           }
           """
 
-          b = BPF(text=bpf_code)
-          print("Tracing ONLY file opens (openat & openat2 tracepoints)... Ctrl+C to stop.")
-          b.trace_print()
+          def run_bpf():
+              b = BPF(text=bpf_code)
+              print("Tracing ONLY .env file opens (openat & openat2 tracepoints)...")
+              # Run until main thread finishes
+              try:
+                  b.trace_print()
+              except KeyboardInterrupt:
+                  pass
+
+          # Start eBPF in background thread
+          t = threading.Thread(target=run_bpf, daemon=True)
+          t.start()
+
+          # Give BPF time to attach
+          time.sleep(1)
+
+          # Trigger a .env file read
+          test_file = "test.env"
+          with open(test_file, "w") as f:
+              f.write("SECRET=12345\n")
+
+          print(f"[TEST] Opening {test_file} ...")
+          with open(test_file, "r") as f:
+              _ = f.read()
+
+          # Let BPF catch it
+          time.sleep(2)
+          print("[TEST] Done. Check trace above.")
+
+          # Cleanup test file
+          os.remove(test_file)
+
 
           EOF
 
