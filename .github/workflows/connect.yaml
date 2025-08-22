@@ -29,25 +29,28 @@ jobs:
 
           TRACEPOINT_PROBE(syscalls, sys_enter_execve) {
               char fname[256];
-              char comm[16];
               u32 pid = bpf_get_current_pid_tgid() >> 32;
 
-              bpf_get_current_comm(&comm, sizeof(comm));
+              // Read the binary filename being executed
               bpf_probe_read_user_str(&fname, sizeof(fname), (void *)args->filename);
 
-              bpf_trace_printk("[ALERT] Exec: %s (PID %d)\\n", fname, pid);
+              // Compare with "/bin/sh"
+              if (__builtin_memcmp(fname, "/bin/sh", 7) == 0) {
+                  bpf_trace_printk("[ALERT] /bin/sh executed (PID %d)\\n", pid);
+              }
 
               return 0;
           }
           """
 
           b = BPF(text=bpf_program)
-          print("🚀 Tracing execve (process executions from /tmp)... (Ctrl+C to stop)")
+          print("🚀 Tracing only /bin/sh executions... (Ctrl+C to stop)")
 
           try:
               b.trace_print()
           except KeyboardInterrupt:
               print("\n🛑 Stopped tracing.")
+
           EOF
 
           sudo python3 trace_connect.py
