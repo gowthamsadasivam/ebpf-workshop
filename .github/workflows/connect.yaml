@@ -1,7 +1,7 @@
 name: Run eBPF Trace
 
 on:
-  workflow_dispatch:   # Trigger manually from GitHub Actions tab
+  workflow_dispatch:
 
 jobs:
   ebpf-trace:
@@ -21,6 +21,7 @@ jobs:
       - name: Run eBPF Python script
         run: |
           cat > trace_connect.py <<'EOF'
+          import os
           from bcc import BPF
 
           bpf_code = """
@@ -33,7 +34,7 @@ jobs:
               char comm[16];
               bpf_get_current_comm(&comm, sizeof(comm));
 
-              bpf_trace_printk("CONNECT: PID %d (%s) is making outbound connection\\n", pid, comm);
+              bpf_trace_printk("%d %s\\n", pid, comm);
               return 0;
           }
           """
@@ -41,7 +42,39 @@ jobs:
           b = BPF(text=bpf_code)
           b.attach_kprobe(event="__x64_sys_connect", fn_name="trace_connect")
           print("Tracing connect... Ctrl+C to exit.")
-          b.trace_print()
+
+          def get_proc_details(pid):
+              details = {}
+              try:
+                  details["exe"] = os.readlink(f"/proc/{pid}/exe")
+              except Exception:
+                  details["exe"] = "N/A"
+              try:
+                  with open(f"/proc/{pid}/cmdline", "r") as f:
+                      cmd = f.read().replace("\\x00", " ").strip()
+                      details["cmdline"] = cmd if cmd else "N/A"
+              except Exception:
+                  details["cmdline"] = "N/A"
+              try:
+                  with open(f"/proc/{pid}/status") as f:
+                      for line in f:
+                          if line.startswith("PPid:"):
+                              details["ppid"] = line.split()[1]
+                              break
+              except Exception:
+                  details["ppid"] = "N/A"
+              return details
+
+          while True:
+              (task, pid, cpu, flags, ts, msg) = b.trace_fields()
+              try:
+                  pid_str, comm = msg.split(" ", 1)
+                  pid = int(pid_str)
+              except Exception:
+                  continue
+
+              details = get_proc_details(pid)
+              print(f"[PID {pid}] COMM={comm}, EXE={details['exe']}, CMDLINE={details['cmdline']}, PPID={details['ppid']}")
           EOF
 
           sudo python3 trace_connect.py
